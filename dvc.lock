@@ -1,0 +1,76 @@
+schema: '2.0'
+stages:
+  ingest:
+    cmd: python data/scripts/ingestion.py
+    outs:
+    - path: data/raw
+      hash: md5
+      md5: 3f55d3c0e92e52735fbea3e9ea4a0a76.dir
+      size: 971241
+      nfiles: 1
+  preprocess:
+    cmd: python data/scripts/preprocess.py
+    deps:
+    - path: data/raw
+      hash: md5
+      md5: 3f55d3c0e92e52735fbea3e9ea4a0a76.dir
+      size: 971241
+      nfiles: 1
+    - path: data/scripts/preprocess.py
+      hash: md5
+      md5: eaf9d2c318ae21fe9922096fc91c6b4e
+      size: 4495
+      isexec: true
+    outs:
+    - path: data/processed
+      hash: md5
+      md5: 693e5e863078229148634a15f9b4c4db.dir
+      size: 1508875
+      nfiles: 6
+  train:
+    cmd: python data/scripts/train.py
+    deps:
+    - path: data/processed
+      hash: md5
+      md5: 693e5e863078229148634a15f9b4c4db.dir
+      size: 1508875
+      nfiles: 6
+    - path: data/scripts/train.py
+      hash: md5
+      md5: 0f42e1c8a2125069023b5ed92e45eb3a
+      size: 3917
+      isexec: true
+    params:
+      params.yaml:
+        train.learning_rate: 0.1
+        train.n_estimators: 200
+    outs:
+    - path: models/churn_model.pkl
+      hash: md5
+      md5: 99dadb8579273d8dcdd78431cf3a0c83
+      size: 4515081
+      isexec: true
+  evaluate:
+    cmd: python data/scripts/evaluate.py
+    deps:
+    - path: data/processed
+      hash: md5
+      md5: 693e5e863078229148634a15f9b4c4db.dir
+      size: 1508875
+      nfiles: 6
+    - path: data/scripts/evaluate.py
+      hash: md5
+      md5: 4c312a880daae78c0bf88d3122043a8f
+      size: 5498
+      isexec: true
+    - path: models/churn_model.pkl
+      hash: md5
+      md5: 99dadb8579273d8dcdd78431cf3a0c83
+      size: 4515081
+      isexec: true
+    outs:
+    - path: reports/evaluation_report.json
+      hash: md5
+      md5: d1d54ceb1e76adc67728a4155cec85c2
+      size: 76
+      isexec: true
