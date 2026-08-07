@@ -1,0 +1,4 @@
+[core]
+    remote = myremote
+['remote "myremote"']
+    url = /mnt/c/Users/8J3604897/dvc-storage
