@@ -1,0 +1,12 @@
+airflow-venv/
+venv/
+mlflow.db
+mlruns/
+models/
+data/raw/
+data/processed/
+reports/
+__pycache__/
+*.pyc
+airflow/logs/
+airflow/airflow.db
