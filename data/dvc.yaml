@@ -1,0 +1,27 @@
+stages:
+  ingest:
+    cmd: python data/scripts/ingest.py
+    outs:
+      - data/raw
+
+  preprocess:
+    cmd: python data/scripts/preprocess.py
+    deps:
+      - data/raw
+      - data/scripts/preprocess.py
+    outs:
+      - data/processed
+
+  train:
+    cmd: python data/scripts/train.py
+    deps:
+      - data/processed
+      - data/scripts/train.py
+    params:
+      - train.learning_rate
+      - train.n_estimators
+    outs:
+      - models/model.pkl
+    metrics:
+      - metrics/train_metrics.json:
+          cache: false
