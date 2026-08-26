@@ -1,0 +1,38 @@
+version: "3.8"
+
+services:
+  churn-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: churn-prediction-api
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./models:/app/models
+      - ./mlruns:/app/mlruns
+    environment:
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  mlflow:
+    image: python:3.12-slim
+    container_name: mlflow-server
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./mlruns:/mlruns
+      - ./mlflow.db:/mlflow.db
+    command: >
+      bash -c "pip install mlflow &&
+               mlflow server
+               --backend-store-uri sqlite:///mlflow.db
+               --default-artifact-root /mlruns
+               --host 0.0.0.0
+               --port 5000"
+    restart: unless-stopped

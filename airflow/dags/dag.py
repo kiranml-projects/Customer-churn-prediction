@@ -1,18 +1,15 @@
 from datetime import datetime, timedelta
 
 from airflow import DAG
-from airflow.providers.standard.operators.python import PythonOperator
+from airflow.providers.standard.operators.bash import BashOperator
 
-# Import main functions from each script
-import sys
-import os
+PROJECT_DIR = "/mnt/c/Users/8J3604897/Customer-churn-prediction"
+VENV_ACTIVATE = f"source {PROJECT_DIR}/airflow-venv/bin/activate"
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "data", "scripts"))
-
-from ingestion import main as ingest_main
-from preprocess import main as preprocess_main
-from train import main as train_main
-from evaluate import main as evaluate_main
+def dvc_command(stage: str) -> str:
+    """Builds the shell command to activate the venv, cd into the
+    project root, and run a single DVC pipeline stage."""
+    return f"{VENV_ACTIVATE} && cd {PROJECT_DIR} && dvc repro {stage}"
 
 # ============================================================
 # DEFAULT ARGS — applied to every task
@@ -31,7 +28,7 @@ default_args = {
 # ============================================================
 with DAG(
     dag_id="customer_churn_pipeline",
-    description="End-to-end churn prediction pipeline",
+    description="End-to-end churn prediction pipeline (DVC-orchestrated)",
     default_args=default_args,
     start_date=datetime(2024, 1, 1),
     schedule="@daily",        # run every day
@@ -42,53 +39,51 @@ with DAG(
     # --------------------------------------------------------
     # TASK 1 — Ingest
     # --------------------------------------------------------
-    ingest_task = PythonOperator(
+    ingest_task = BashOperator(
         task_id="ingest",
-        python_callable=ingest_main,
+        bash_command=dvc_command("ingest"),
         doc_md="""
-        Downloads the Telco churn dataset from source URL
-        and saves it to data/raw/ with a timestamped filename.
+        Runs the DVC `ingest` stage: downloads the Telco churn dataset
+        from source URL and saves it to data/raw/ with a timestamped
+        filename. Skipped by DVC if inputs haven't changed since the
+        last successful run.
         """,
     )
 
     # --------------------------------------------------------
     # TASK 2 — Preprocess
     # --------------------------------------------------------
-    preprocess_task = PythonOperator(
+    preprocess_task = BashOperator(
         task_id="preprocess",
-        python_callable=preprocess_main,
+        bash_command=dvc_command("preprocess"),
         doc_md="""
-        Loads latest raw CSV, cleans it, encodes features,
-        splits into train/val/test and saves to data/processed/.
+        Runs the DVC `preprocess` stage: loads latest raw CSV, cleans it,
+        encodes features, splits into train/val/test and saves to
+        data/processed/.
         """,
     )
 
     # --------------------------------------------------------
     # TASK 3 — Train
     # --------------------------------------------------------
-    train_task = PythonOperator(
+    train_task = BashOperator(
         task_id="train",
-        python_callable=train_main,
+        bash_command=dvc_command("train"),
         doc_md="""
-        Trains RandomForest on train split, evaluates on val,
-        logs params/metrics/model to MLflow.
+        Runs the DVC `train` stage: trains RandomForest on train split,
+        evaluates on val, logs params/metrics/model to MLflow.
         """,
     )
 
     # --------------------------------------------------------
     # TASK 4 — Evaluate
     # --------------------------------------------------------
-    evaluate_task = PythonOperator(
+    evaluate_task = BashOperator(
         task_id="evaluate",
-        python_callable=evaluate_main,
+        bash_command=dvc_command("evaluate"),
         doc_md="""
-        Evaluates model on held-out test set, generates
-        confusion matrix, ROC curve, feature importance plots
-        and promotes model if ROC-AUC >= 0.80.
+        Runs the DVC `evaluate` stage: evaluates model on held-out test
+        set, generates confusion matrix, ROC curve, feature importance
+        plots and writes the evaluation report.
         """,
     )
-
-    # --------------------------------------------------------
-    # TASK DEPENDENCIES — defines execution order
-    # --------------------------------------------------------
-    ingest_task >> preprocess_task >> train_task >> evaluate_task
