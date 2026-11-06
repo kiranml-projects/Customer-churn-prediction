@@ -1,141 +1,95 @@
 """
-preprocess.py — Loads the latest raw Telco churn CSV, cleans it,
-engineers features, and saves train/val/test splits to data/processed/.
+preprocess.py — Stage 2: clean the raw data, one-hot encode categoricals,
+split 70/15/15 (stratified), and scale numeric columns.
 
-This will become the second task in our Airflow DAG.
+Outputs:
+  data/processed/{X,y}_{train,val,test}.csv
+  models/scaler.pkl   (fit on TRAIN only, reused by the API)
 """
 
-import glob
-import logging
 import os
-from datetime import datetime
 
 import joblib
 import pandas as pd
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-logger = logging.getLogger(__name__)
+from common import (
+    MODELS_DIR,
+    NUMERIC_COLS,
+    PROCESSED_DIR,
+    RAW_FILE,
+    TARGET,
+    get_logger,
+    load_params,
+)
 
-RAW_DIR = os.path.join(os.path.dirname(__file__), "..", "raw")
-PROCESSED_DIR = os.path.join(os.path.dirname(__file__), "..", "processed")
-MODELS_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "models")
-
-NUMERIC_COLS = ["tenure", "MonthlyCharges", "TotalCharges"]
-
-
-def load_latest_raw() -> pd.DataFrame:
-    files = glob.glob(os.path.join(RAW_DIR, "*.csv"))
-    if not files:
-        raise FileNotFoundError(f"No raw CSV files found in {RAW_DIR}")
-    latest = max(files, key=os.path.getctime)
-    logger.info(f"Loading latest raw file: {latest}")
-    df = pd.read_csv(latest)
-    logger.info(f"Loaded {len(df)} rows, {len(df.columns)} columns")
-    return df
+logger = get_logger(__name__)
 
 
 def clean(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
-
-    # 1. Fix TotalCharges — contains spaces, should be float
+    # TotalCharges is blank for brand-new customers (tenure 0) -> 0.0
     df["TotalCharges"] = pd.to_numeric(df["TotalCharges"], errors="coerce").fillna(0.0)
-
-    # 2. Drop customerID — not a feature
+    # customerID is an identifier, not a feature
     df = df.drop(columns=["customerID"])
-
-    # 3. Encode target
-    df["Churn"] = df["Churn"].map({"Yes": 1, "No": 0})
-
-    logger.info(f"Churn distribution:\n{df['Churn'].value_counts()}")
+    df[TARGET] = df[TARGET].map({"Yes": 1, "No": 0})
+    logger.info(f"Churn rate: {df[TARGET].mean():.3f}")
     return df
 
 
 def encode_features(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-
-    # Separate categorical columns (everything except numeric and target)
-    cat_cols = [
-        col for col in df.columns
-        if col not in NUMERIC_COLS + ["Churn"]
-    ]
-
-    # One-hot encode categoricals
-    df = pd.get_dummies(df, columns=cat_cols, drop_first=True)
-    logger.info(f"After one-hot encoding: {df.shape[1]} columns")
-
+    cat_cols = [c for c in df.columns if c not in NUMERIC_COLS + [TARGET]]
+    df = pd.get_dummies(df, columns=cat_cols, drop_first=True, dtype=int)
+    logger.info(f"After one-hot encoding: {df.shape[1] - 1} features")
     return df
 
 
-def split_and_save(df: pd.DataFrame) -> dict:
-    os.makedirs(PROCESSED_DIR, exist_ok=True)
-    os.makedirs(MODELS_DIR, exist_ok=True)
-
-    # Separate features and target
-    X = df.drop(columns=["Churn"])
-    y = df["Churn"]
-
-    # Split: 70% train, 30% temp
+def split(df: pd.DataFrame, test_size: float, val_share: float, random_state: int) -> dict:
+    X = df.drop(columns=[TARGET])
+    y = df[TARGET]
     X_train, X_temp, y_train, y_temp = train_test_split(
-        X, y, test_size=0.30, random_state=42, stratify=y
+        X, y, test_size=test_size, random_state=random_state, stratify=y
     )
-
-    # Split temp: 50/50 → 15% val, 15% test
     X_val, X_test, y_val, y_test = train_test_split(
-        X_temp, y_temp, test_size=0.50, random_state=42, stratify=y_temp
+        X_temp, y_temp, test_size=val_share, random_state=random_state, stratify=y_temp
     )
-
     logger.info(f"Train: {len(X_train)} | Val: {len(X_val)} | Test: {len(X_test)}")
-
-    # Fit scaler on TRAIN only — prevent data leakage
-    scaler = StandardScaler()
-    X_train[NUMERIC_COLS] = scaler.fit_transform(X_train[NUMERIC_COLS])
-    X_val[NUMERIC_COLS] = scaler.transform(X_val[NUMERIC_COLS])
-    X_test[NUMERIC_COLS] = scaler.transform(X_test[NUMERIC_COLS])
-
-    # Save scaler for inference
-    scaler_path = os.path.join(MODELS_DIR, "scaler.pkl")
-    joblib.dump(scaler, scaler_path)
-    logger.info(f"Scaler saved to {scaler_path}")
-
-    # Save splits with timestamp
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    splits = {
-        "X_train": (X_train, f"X_train_{timestamp}.csv"),
-        "y_train": (y_train, f"y_train_{timestamp}.csv"),
-        "X_val":   (X_val,   f"X_val_{timestamp}.csv"),
-        "y_val":   (y_val,   f"y_val_{timestamp}.csv"),
-        "X_test":  (X_test,  f"X_test_{timestamp}.csv"),
-        "y_test":  (y_test,  f"y_test_{timestamp}.csv"),
+    return {
+        "X_train": X_train,
+        "y_train": y_train,
+        "X_val": X_val,
+        "y_val": y_val,
+        "X_test": X_test,
+        "y_test": y_test,
     }
 
-    paths = {}
-    for key, (data, filename) in splits.items():
-        path = os.path.join(PROCESSED_DIR, filename)
-        data.to_csv(path, index=False)
-        paths[key] = path
-        logger.info(f"Saved {key}: {path}")
 
-    return paths
+def scale(splits: dict) -> StandardScaler:
+    """Fit on TRAIN only, then transform val/test -> no data leakage."""
+    scaler = StandardScaler()
+    splits["X_train"][NUMERIC_COLS] = scaler.fit_transform(splits["X_train"][NUMERIC_COLS])
+    for key in ("X_val", "X_test"):
+        splits[key][NUMERIC_COLS] = scaler.transform(splits[key][NUMERIC_COLS])
+    return scaler
 
 
-def main():
-    logger.info("Starting preprocessing run")
+def save(splits: dict, scaler: StandardScaler) -> None:
+    os.makedirs(PROCESSED_DIR, exist_ok=True)
+    os.makedirs(MODELS_DIR, exist_ok=True)
+    for name, data in splits.items():
+        data.to_csv(os.path.join(PROCESSED_DIR, f"{name}.csv"), index=False)
+    joblib.dump(scaler, os.path.join(MODELS_DIR, "scaler.pkl"))
+    logger.info(f"Saved splits to {PROCESSED_DIR} and scaler to {MODELS_DIR}")
 
-    df = load_latest_raw()
-    logger.info(f"Loaded raw data: {df.shape}")
 
-    df = clean(df)
-    logger.info(f"After cleaning: {df.shape}")
-
-    df = encode_features(df)
-    logger.info(f"After encoding: {df.shape}")
-
-    paths = split_and_save(df)
-    logger.info(f"Preprocessing complete. Splits saved: {paths}")
-
-    return paths
+def main() -> None:
+    p = load_params()["data"]
+    df = pd.read_csv(RAW_FILE)
+    df = encode_features(clean(df))
+    splits = split(df, p["test_size"], p["val_share"], p["random_state"])
+    scaler = scale(splits)
+    save(splits, scaler)
 
 
 if __name__ == "__main__":

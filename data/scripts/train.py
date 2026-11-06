@@ -1,12 +1,9 @@
 """
-train.py — Loads the latest processed splits, trains a RandomForest
-classifier, tracks everything with MLflow, and registers the best model.
-
-This will become the third task in our Airflow DAG.
+train.py — Stage 3: train a RandomForest with hyperparameters from
+params.yaml, log params/metrics/model to MLflow, and register a new
+version of the model in the MLflow Model Registry.
 """
 
-import glob
-import logging
 import os
 
 import joblib
@@ -14,122 +11,67 @@ import mlflow
 import mlflow.sklearn
 import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import (
-    accuracy_score,
-    classification_report,
-    f1_score,
-    roc_auc_score,
+from sklearn.metrics import accuracy_score, f1_score, recall_score, roc_auc_score
+
+from common import (
+    EXPERIMENT_NAME,
+    MLFLOW_TRACKING_URI,
+    MODELS_DIR,
+    PROCESSED_DIR,
+    REGISTERED_MODEL_NAME,
+    get_logger,
+    load_params,
 )
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-logger = logging.getLogger(__name__)
-
-PROCESSED_DIR = os.path.join(os.path.dirname(__file__), "..", "processed")
-MODELS_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "models")
-
-MLFLOW_TRACKING_URI = "sqlite:///mlflow.db"
-EXPERIMENT_NAME = "customer-churn-prediction"
-
-# Hyperparameters
-PARAMS = {
-    "n_estimators": 100,
-    "max_depth": 10,
-    "min_samples_split": 5,
-    "min_samples_leaf": 2,
-    "random_state": 42,
-    "class_weight": "balanced",  # handles class imbalance
-}
+logger = get_logger(__name__)
 
 
-def load_latest_splits() -> tuple:
-    """Load the most recent train/val splits from data/processed/"""
-
-    def latest(pattern):
-        files = glob.glob(os.path.join(PROCESSED_DIR, pattern))
-        if not files:
-            raise FileNotFoundError(f"No files found for pattern: {pattern}")
-        return max(files, key=os.path.getctime)
-
-    X_train = pd.read_csv(latest("X_train_*.csv"))
-    y_train = pd.read_csv(latest("y_train_*.csv")).squeeze()
-    X_val   = pd.read_csv(latest("X_val_*.csv"))
-    y_val   = pd.read_csv(latest("y_val_*.csv")).squeeze()
-
-    logger.info(f"X_train: {X_train.shape} | X_val: {X_val.shape}")
-    return X_train, y_train, X_val, y_val
+def load_split(name: str) -> pd.DataFrame:
+    return pd.read_csv(os.path.join(PROCESSED_DIR, f"{name}.csv"))
 
 
-def train(X_train, y_train) -> RandomForestClassifier:
-    """Train RandomForest with predefined hyperparameters"""
-    model = RandomForestClassifier(**PARAMS)
+def train(X_train: pd.DataFrame, y_train: pd.Series, params: dict) -> RandomForestClassifier:
+    model = RandomForestClassifier(**params)
     model.fit(X_train, y_train)
-    logger.info("Model training complete")
     return model
 
 
-def evaluate(model, X_val, y_val) -> dict:
-    """Evaluate model on validation set — return metrics dict"""
-    y_pred = model.predict(X_val)
-    y_proba = model.predict_proba(X_val)[:, 1]
-
-    metrics = {
-        "accuracy":  accuracy_score(y_val, y_pred),
-        "f1_score":  f1_score(y_val, y_pred),
-        "roc_auc":   roc_auc_score(y_val, y_proba),
+def score(model, X: pd.DataFrame, y: pd.Series) -> dict:
+    y_pred = model.predict(X)
+    y_proba = model.predict_proba(X)[:, 1]
+    return {
+        "val_accuracy": accuracy_score(y, y_pred),
+        "val_f1": f1_score(y, y_pred),
+        "val_recall": recall_score(y, y_pred),
+        "val_roc_auc": roc_auc_score(y, y_proba),
     }
 
+
+def main() -> dict:
+    params = load_params()["train"]
+    X_train, y_train = load_split("X_train"), load_split("y_train").squeeze()
+    X_val, y_val = load_split("X_val"), load_split("y_val").squeeze()
+
+    model = train(X_train, y_train, params)
+    metrics = score(model, X_val, y_val)
     logger.info(f"Validation metrics: {metrics}")
-    logger.info(f"\n{classification_report(y_val, y_pred)}")
-    return metrics
 
-
-def save_model(model) -> str:
-    """Save model locally with joblib"""
+    # Save the local artifact first: DVC and the API depend on it
     os.makedirs(MODELS_DIR, exist_ok=True)
-    path = os.path.join(MODELS_DIR, "churn_model.pkl")
-    joblib.dump(model, path)
-    logger.info(f"Model saved to {path}")
-    return path
+    joblib.dump(model, os.path.join(MODELS_DIR, "churn_model.pkl"))
 
-
-def main():
-    logger.info("Starting training run")
-
-    # Setup MLflow
     mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
     mlflow.set_experiment(EXPERIMENT_NAME)
-
-    # Load data
-    X_train, y_train, X_val, y_val = load_latest_splits()
-
-    # Train + evaluate + log with MLflow
-    with mlflow.start_run():
-
-        # Log hyperparameters
-        mlflow.log_params(PARAMS)
-
-        # Train
-        model = train(X_train, y_train)
-
-        # Evaluate
-        metrics = evaluate(model, X_val, y_val)
-
-        # Log metrics
+    with mlflow.start_run(run_name="train") as run:
+        mlflow.log_params(params)
         mlflow.log_metrics(metrics)
-
-        # Log model to MLflow
         mlflow.sklearn.log_model(
             model,
             artifact_path="model",
-            registered_model_name="churn-rf-model",
+            registered_model_name=REGISTERED_MODEL_NAME,
+            input_example=X_val.head(3).astype(float),
         )
-
-        # Save locally too
-        save_model(model)
-
-        run_id = mlflow.active_run().info.run_id
-        logger.info(f"MLflow run_id: {run_id}")
-        logger.info(f"Training complete. ROC-AUC: {metrics['roc_auc']:.4f}")
+        logger.info(f"MLflow run_id: {run.info.run_id}")
 
     return metrics
 

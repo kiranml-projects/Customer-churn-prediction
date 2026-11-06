@@ -1,4 +1,5 @@
 [core]
-    remote = myremote
-['remote "myremote"']
-    url = /mnt/c/Users/8J3604897/dvc-storage
+    autostage = true
+# Remote storage is configured per machine (not committed), e.g.:
+#   dvc remote add -d --local myremote s3://<your-bucket>/churn-dvc
+#   dvc remote add -d --local myremote /path/to/dvc-storage

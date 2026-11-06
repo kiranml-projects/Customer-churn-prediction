@@ -1,16 +1,25 @@
 stages:
   ingest:
     cmd: python data/scripts/ingestion.py
+    deps:
+      - data/scripts/ingestion.py
+    params:
+      - data.url
     outs:
-      - data/raw
+      - data/raw/telco_churn.csv
 
   preprocess:
     cmd: python data/scripts/preprocess.py
     deps:
-      - data/raw
+      - data/raw/telco_churn.csv
       - data/scripts/preprocess.py
+    params:
+      - data.test_size
+      - data.val_share
+      - data.random_state
     outs:
       - data/processed
+      - models/scaler.pkl
 
   train:
     cmd: python data/scripts/train.py
@@ -18,8 +27,7 @@ stages:
       - data/processed
       - data/scripts/train.py
     params:
-      - train.learning_rate
-      - train.n_estimators
+      - train
     outs:
       - models/churn_model.pkl
 
@@ -29,6 +37,15 @@ stages:
       - models/churn_model.pkl
       - data/processed
       - data/scripts/evaluate.py
+    params:
+      - evaluate.min_roc_auc
     metrics:
       - reports/evaluation_report.json:
+          cache: false
+    plots:
+      - reports/confusion_matrix.png:
+          cache: false
+      - reports/roc_curve.png:
+          cache: false
+      - reports/feature_importance.png:
           cache: false

@@ -1,3 +1,16 @@
+data:
+  url: https://raw.githubusercontent.com/IBM/telco-customer-churn-on-icp4d/master/data/Telco-Customer-Churn.csv
+  test_size: 0.30        # 70% train, 30% split again into val/test
+  val_share: 0.50        # 15% val, 15% test
+  random_state: 42
+
 train:
-  learning_rate: 0.1
-  n_estimators: 200
+  n_estimators: 100
+  max_depth: 10
+  min_samples_split: 5
+  min_samples_leaf: 2
+  class_weight: balanced
+  random_state: 42
+
+evaluate:
+  min_roc_auc: 0.80      # quality gate for promotion

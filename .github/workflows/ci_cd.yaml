@@ -1,0 +1,114 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.12"
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/churn-prediction-api
+
+jobs:
+  # ------------------------------------------------------------------
+  # 1. Lint, run the DVC pipeline, test the code and the model
+  # ------------------------------------------------------------------
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements*.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Lint
+        run: |
+          ruff check .
+          ruff format --check .
+
+      - name: Unit tests (no data needed)
+        run: pytest -q
+
+      - name: Run DVC pipeline (ingest -> preprocess -> train -> evaluate)
+        run: dvc repro
+
+      - name: Model and contract tests (need pipeline outputs)
+        run: pytest -q
+
+      - name: Publish metrics to the job summary
+        run: |
+          echo "## Model metrics (test set)" >> "$GITHUB_STEP_SUMMARY"
+          dvc metrics show --md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload model and reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: model-${{ github.sha }}
+          path: |
+            models/churn_model.pkl
+            models/scaler.pkl
+            reports/
+          retention-days: 14
+
+  # ------------------------------------------------------------------
+  # 2. Build the API image, scan it, smoke-test it, push on main
+  # ------------------------------------------------------------------
+  docker:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download the trained model
+        uses: actions/download-artifact@v4
+        with:
+          name: model-${{ github.sha }}
+
+      - name: Build image
+        run: docker build -t "$IMAGE_NAME:${{ github.sha }}" .
+
+      - name: Scan image for critical vulnerabilities (Trivy)
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy:0.57.1 image \
+            --severity CRITICAL --ignore-unfixed --exit-code 1 --no-progress \
+            "$IMAGE_NAME:${{ github.sha }}"
+
+      - name: Smoke test the container
+        run: |
+          docker run -d --name api -p 8000:8000 "$IMAGE_NAME:${{ github.sha }}"
+          for i in $(seq 1 30); do
+            curl -fs http://localhost:8000/health && break
+            sleep 2
+          done
+          curl -fs http://localhost:8000/info
+          docker logs api
+          docker rm -f api
+
+      - name: Push to GitHub Container Registry
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker tag "$IMAGE_NAME:${{ github.sha }}" "$IMAGE_NAME:latest"
+          docker push "$IMAGE_NAME:${{ github.sha }}"
+          docker push "$IMAGE_NAME:latest"

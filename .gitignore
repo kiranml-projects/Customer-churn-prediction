@@ -1,12 +1,27 @@
-airflow-venv/
-venv/
-mlflow.db
-mlruns/
-models/
-data/raw/
-data/processed/
-reports/
+# Python
 __pycache__/
 *.pyc
-airflow/logs/
-airflow/airflow.db
+.pytest_cache/
+.ruff_cache/
+venv/
+.venv/
+airflow-venv/
+
+# DVC-managed outputs (tracked by dvc.lock, stored in the DVC remote)
+/data/raw/
+/data/processed/
+/models/
+/reports/
+
+# MLflow local store
+mlflow.db
+mlruns/
+mlartifacts/
+
+# Airflow runtime files: contain secrets and local state — never commit
+airflow/*
+!airflow/dags/
+airflow/dags/__pycache__/
+
+# Local env / secrets
+.env
